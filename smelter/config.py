@@ -225,7 +225,8 @@ class TrainingConfig:
     weight_decay: float = 0.1
     
     # Schedule
-    warmup_steps: int = 1000
+    # NOTE: Muon converges faster, so shorter warmup is recommended
+    warmup_steps: int = 500  # Shorter for Muon (was 1000 for AdamW)
     max_steps: int = 100000
     
     # Gradient clipping

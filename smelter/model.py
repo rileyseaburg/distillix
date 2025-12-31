@@ -289,10 +289,11 @@ class Attention(nn.Module):
         
         # Logit soft-capping (Gemma 2 style)
         # Prevents extreme attention logits: logits = cap * tanh(logits / cap)
+        # NOTE: Run in float32 to avoid AMP precision issues with tanh
         if self.attn_logit_soft_cap is not None:
             attn_weights = self.attn_logit_soft_cap * torch.tanh(
-                attn_weights / self.attn_logit_soft_cap
-            )
+                attn_weights.float() / self.attn_logit_soft_cap
+            ).to(attn_weights.dtype)
         
         # Apply causal mask if no custom mask provided
         if attention_mask is None:
@@ -563,10 +564,11 @@ class StudentLLM(nn.Module):
         
         # Final logit soft-capping (Gemma 2 style)
         # Prevents extreme logits before loss/sampling: logits = cap * tanh(logits / cap)
+        # NOTE: Run in float32 to avoid AMP precision issues with tanh
         if self.final_logit_soft_cap is not None:
             logits = self.final_logit_soft_cap * torch.tanh(
-                logits / self.final_logit_soft_cap
-            )
+                logits.float() / self.final_logit_soft_cap
+            ).to(logits.dtype)
         
         # Compute loss if labels provided
         loss = None
