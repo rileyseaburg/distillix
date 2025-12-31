@@ -254,8 +254,15 @@ class OpenCodeClient:
             ]
         }
         
+        # Parse model ID into provider and model components
+        # Format: "provider/model" e.g., "minimax/MiniMax-M2.1"
         if model:
-            body["model"] = model
+            if "/" in model:
+                provider_id, model_id = model.split("/", 1)
+                body["providerID"] = provider_id
+                body["modelID"] = model_id
+            else:
+                body["modelID"] = model
         
         if system_prompt:
             body["system"] = system_prompt

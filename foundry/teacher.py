@@ -32,24 +32,25 @@ logger = logging.getLogger("distillix.foundry")
 class TeacherModel(Enum):
     """Available teacher models."""
     
-    # Azure AI Foundry - Anthropic Claude
-    AZURE_CLAUDE = "azure/claude-sonnet-4-5"
+    # MiniMax M2.1 (high velocity, $0.3/$1.2 per M tokens)
+    MINIMAX_M21 = "minimax/MiniMax-M2.1"
     
-    # ZAI Coding Plan - GLM 4.7
+    # Azure AI Foundry - Anthropic Claude Opus 4.5
+    AZURE_CLAUDE = "azure-anthropic/claude-opus-4-5"
+    
+    # ZAI Coding Plan - GLM 4.7 (free tier)
     GLM_47 = "zai-coding-plan/glm-4.7"
     
-    # MiniMax M2.1
-    MINIMAX_M21 = "minimax/MiniMax-M2.1"
+    # Anthropic direct
+    ANTHROPIC_OPUS = "anthropic/claude-opus-4-5"
     
     @classmethod
     def all(cls) -> List[str]:
         return [m.value for m in cls]
 
 
-# Default teacher ensemble
+# Default teacher - MiniMax for velocity
 DEFAULT_TEACHERS = [
-    TeacherModel.AZURE_CLAUDE.value,
-    TeacherModel.GLM_47.value,
     TeacherModel.MINIMAX_M21.value,
 ]
 

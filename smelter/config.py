@@ -198,8 +198,9 @@ class TrainingConfig:
     """
     
     # Batch size
-    micro_batch_size: int = 4  # Per-GPU batch size
-    gradient_accumulation_steps: int = 8  # Effective batch = 32
+    # NOTE: Optimized for RTX 2080 Super (8GB) - use full VRAM
+    micro_batch_size: int = 16  # Per-GPU batch size (was 4, now 4x faster)
+    gradient_accumulation_steps: int = 2  # Effective batch = 32 (16 * 2)
     
     # ==========================================================================
     # Optimizer: Hybrid Muon + AdamW (Stanford "Fantastic Optimizers" paper)
@@ -320,13 +321,20 @@ class DistillationConfig:
     label_smoothing: float = 0.1
     
     # Teacher models (via OpenCode server)
+    # Strategy: MiniMax for high-velocity generation, Claude for quality cleanup
     teachers: List[str] = field(default_factory=lambda: [
-        "azure/claude-sonnet-4-5",
-        "zai-coding-plan/glm-4.7",
-        "minimax/MiniMax-M2.1",
+        "minimax/MiniMax-M2.1",  # Primary: High velocity ($0.3/$1.2 per M tokens)
+    ])
+    
+    # Alternative teachers for ensemble or fallback
+    teachers_ensemble: List[str] = field(default_factory=lambda: [
+        "minimax/MiniMax-M2.1",  # Fast, cheap
+        "azure-anthropic/claude-opus-4-5",  # Quality cleanup
+        "zai-coding-plan/glm-4.7",  # Free tier
     ])
     
     # Teacher selection strategy
+    # "random" for single fast teacher, "ensemble" for multi-teacher quality
     teacher_strategy: Literal["random", "round_robin", "ensemble", "best"] = "random"
     
     # OpenCode server
