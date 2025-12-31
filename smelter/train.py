@@ -587,22 +587,69 @@ class Trainer:
         if self.wandb_run:
             self.wandb_run.finish()
     
-    def save_model(self, path: str):
-        """Save model weights in a deployment-ready format."""
+    def save_model(self, path: str, use_safetensors: bool = True):
+        """
+        Save model weights in a deployment-ready format.
+        
+        Args:
+            path: Directory to save model
+            use_safetensors: Use SafeTensors format (recommended for security/speed)
+        """
         save_path = Path(path)
         save_path.mkdir(parents=True, exist_ok=True)
         
         # Save model weights
-        torch.save(self.model.state_dict(), save_path / "model.pt")
+        if use_safetensors:
+            try:
+                from safetensors.torch import save_file
+                
+                # SafeTensors requires flat dict with string keys
+                state_dict = self.model.state_dict()
+                save_file(state_dict, save_path / "model.safetensors")
+                self.logger.info(f"Saved model weights as SafeTensors")
+            except ImportError:
+                self.logger.warning("safetensors not installed, falling back to torch.save")
+                torch.save(self.model.state_dict(), save_path / "model.pt")
+        else:
+            torch.save(self.model.state_dict(), save_path / "model.pt")
         
         # Save config
-        self.config.model.save(save_path / "config.json")
+        self.config.model.save(str(save_path / "config.json"))
         
         # Save tokenizer if available
         if self.tokenizer is not None:
             self.tokenizer.tokenizer.save_pretrained(save_path / "tokenizer")
         
         self.logger.info(f"Model saved to {save_path}")
+    
+    def load_model(self, path: str):
+        """
+        Load model weights from checkpoint.
+        
+        Args:
+            path: Directory containing model files
+        """
+        load_path = Path(path)
+        
+        # Try SafeTensors first, then fall back to .pt
+        safetensors_path = load_path / "model.safetensors"
+        pt_path = load_path / "model.pt"
+        
+        if safetensors_path.exists():
+            try:
+                from safetensors.torch import load_file
+                state_dict = load_file(safetensors_path)
+                self.model.load_state_dict(state_dict)
+                self.logger.info(f"Loaded model from SafeTensors: {safetensors_path}")
+            except ImportError:
+                self.logger.error("safetensors not installed, cannot load .safetensors file")
+                raise
+        elif pt_path.exists():
+            state_dict = torch.load(pt_path, map_location=self.device)
+            self.model.load_state_dict(state_dict)
+            self.logger.info(f"Loaded model from PyTorch: {pt_path}")
+        else:
+            raise FileNotFoundError(f"No model file found in {load_path}")
 
 
 # =============================================================================

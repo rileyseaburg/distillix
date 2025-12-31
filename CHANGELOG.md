@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2025-12-31
+
+### Added
+
+- **Data Sanitizer** (`foundry/generate.py`)
+  - Filters API refusals ("I'm sorry, as an AI...")
+  - Detects broken/truncated responses
+  - Quality scoring based on repetition, structure, relevance
+  - Cleans markdown artifacts
+  - Detailed sanitization statistics
+
+- **"Phi Protocol" Prompts** (`foundry/generate.py`)
+  - Textbook-quality prompt templates
+  - Structured output format: Concept -> Explanation -> Code -> Pitfalls
+  - Based on Microsoft Phi-1 methodology (textbook >> raw code)
+
+- **SafeTensors Support** (`smelter/train.py`)
+  - `save_model()` now uses SafeTensors by default
+  - `load_model()` auto-detects format (.safetensors or .pt)
+  - Faster loading and more secure than pickle
+
+### Changed
+
+- Updated `requirements.txt` with `safetensors>=0.4.0`
+- Generation prompts now use structured templates for higher quality data
+
 ## [0.2.0] - 2025-12-31
 
 ### Added
