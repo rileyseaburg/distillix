@@ -35,6 +35,7 @@ from .model import StudentLLM
 from .loss import DistillationLoss, TextDistillationLoss
 from .data import create_dataloader, TokenizerWrapper
 from .config import Config, ModelConfig, TrainingConfig, get_config_125m
+from .muon import Muon, MuonAdamW
 
 
 # =============================================================================
@@ -168,6 +169,13 @@ class Trainer:
         
         self.model = model.to(self.device)
         
+        # torch.compile() for Triton fused kernels (PyTorch 2.0+)
+        # Gives "free" speedups without custom CUDA code
+        if hasattr(torch, 'compile') and config.training.use_torch_compile:
+            self.logger.info("Compiling model with torch.compile() for Triton optimization...")
+            self.model = torch.compile(self.model, mode="reduce-overhead")
+            self.logger.info("Model compiled successfully")
+        
         # Gradient checkpointing
         if config.training.gradient_checkpointing:
             self.model.enable_gradient_checkpointing()
@@ -189,14 +197,24 @@ class Trainer:
         
         # Optimizer
         self.optimizer = self._create_optimizer()
+        self.use_muon = config.training.optimizer == "muon"
         
         # Scheduler
-        self.scheduler = get_lr_scheduler(
-            self.optimizer,
-            warmup_steps=config.training.warmup_steps,
-            max_steps=config.training.max_steps,
-            min_lr_ratio=config.training.min_learning_rate / config.training.learning_rate,
-        )
+        # For MuonAdamW, we schedule the AdamW part (vectors) since Muon uses fixed high LR
+        if self.use_muon and hasattr(self.optimizer, 'adamw') and self.optimizer.adamw is not None:
+            self.scheduler = get_lr_scheduler(
+                self.optimizer.adamw,
+                warmup_steps=config.training.warmup_steps,
+                max_steps=config.training.max_steps,
+                min_lr_ratio=config.training.min_learning_rate / config.training.adamw_lr,
+            )
+        else:
+            self.scheduler = get_lr_scheduler(
+                self.optimizer,
+                warmup_steps=config.training.warmup_steps,
+                max_steps=config.training.max_steps,
+                min_lr_ratio=config.training.min_learning_rate / config.training.learning_rate,
+            )
         
         # Loss function
         self.loss_fn = TextDistillationLoss(
@@ -220,33 +238,65 @@ class Trainer:
         if config.training.use_wandb:
             self._setup_wandb()
     
-    def _create_optimizer(self) -> AdamW:
-        """Create optimizer with weight decay handling."""
-        # Separate parameters that should and shouldn't have weight decay
-        decay_params = []
-        no_decay_params = []
+    def _create_optimizer(self):
+        """
+        Create optimizer based on config.
         
-        for name, param in self.model.named_parameters():
-            if not param.requires_grad:
-                continue
+        If optimizer == "muon": Uses hybrid Muon + AdamW setup (Stanford "Fantastic Optimizers")
+          - Muon for 2D matrix params (BitLinear weights) with high LR (0.02)
+          - AdamW for 1D vector params (norms, biases, embeddings) with normal LR (3e-4)
+        
+        Otherwise: Falls back to standard AdamW.
+        """
+        if self.training_config.optimizer == "muon":
+            # Stanford hybrid optimizer: Muon for matrices, AdamW for vectors
+            self.logger.info("Creating hybrid Muon + AdamW optimizer (Stanford 'Fantastic Optimizers')")
             
-            # No weight decay for biases and normalization weights
-            if 'bias' in name or 'norm' in name or 'embedding' in name:
-                no_decay_params.append(param)
-            else:
-                decay_params.append(param)
+            optimizer = MuonAdamW(
+                self.model.named_parameters(),
+                muon_lr=self.training_config.muon_lr,
+                muon_momentum=self.training_config.muon_momentum,
+                adamw_lr=self.training_config.adamw_lr,
+                adamw_betas=(self.training_config.adamw_beta1, self.training_config.adamw_beta2),
+                adamw_eps=self.training_config.adamw_eps,
+                weight_decay=self.training_config.muon_weight_decay,
+                adamw_weight_decay=self.training_config.adamw_weight_decay,
+            )
+            
+            self.logger.info(f"  Muon (matrices): {optimizer.num_matrix_params:,} params @ lr={self.training_config.muon_lr}")
+            self.logger.info(f"  AdamW (vectors): {optimizer.num_vector_params:,} params @ lr={self.training_config.adamw_lr}")
+            
+            return optimizer
         
-        param_groups = [
-            {"params": decay_params, "weight_decay": self.training_config.weight_decay},
-            {"params": no_decay_params, "weight_decay": 0.0},
-        ]
-        
-        return AdamW(
-            param_groups,
-            lr=self.training_config.learning_rate,
-            betas=(self.training_config.adam_beta1, self.training_config.adam_beta2),
-            eps=self.training_config.adam_eps,
-        )
+        else:
+            # Fallback to standard AdamW
+            self.logger.info(f"Creating {self.training_config.optimizer} optimizer")
+            
+            # Separate parameters that should and shouldn't have weight decay
+            decay_params = []
+            no_decay_params = []
+            
+            for name, param in self.model.named_parameters():
+                if not param.requires_grad:
+                    continue
+                
+                # No weight decay for biases and normalization weights
+                if 'bias' in name or 'norm' in name or 'embedding' in name:
+                    no_decay_params.append(param)
+                else:
+                    decay_params.append(param)
+            
+            param_groups = [
+                {"params": decay_params, "weight_decay": self.training_config.weight_decay},
+                {"params": no_decay_params, "weight_decay": 0.0},
+            ]
+            
+            return AdamW(
+                param_groups,
+                lr=self.training_config.learning_rate,
+                betas=(self.training_config.adamw_beta1, self.training_config.adamw_beta2),
+                eps=self.training_config.adamw_eps,
+            )
     
     def _setup_wandb(self):
         """Initialize Weights & Biases logging."""
@@ -355,8 +405,15 @@ class Trainer:
     def optimizer_step(self):
         """Execute optimizer step with gradient clipping."""
         if self.scaler is not None:
-            # Unscale gradients
-            self.scaler.unscale_(self.optimizer)
+            # Unscale gradients for AMP
+            # For MuonAdamW, we need to unscale for each internal optimizer
+            if self.use_muon:
+                if self.optimizer.muon is not None:
+                    self.scaler.unscale_(self.optimizer.muon)
+                if self.optimizer.adamw is not None:
+                    self.scaler.unscale_(self.optimizer.adamw)
+            else:
+                self.scaler.unscale_(self.optimizer)
         
         # Gradient clipping
         grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -366,12 +423,20 @@ class Trainer:
         
         # Optimizer step
         if self.scaler is not None:
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
+            # For MuonAdamW, step each optimizer through scaler
+            if self.use_muon:
+                if self.optimizer.muon is not None:
+                    self.scaler.step(self.optimizer.muon)
+                if self.optimizer.adamw is not None:
+                    self.scaler.step(self.optimizer.adamw)
+                self.scaler.update()
+            else:
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
         else:
             self.optimizer.step()
         
-        # Scheduler step
+        # Scheduler step (only schedules AdamW LR for Muon, see __init__)
         self.scheduler.step()
         
         # Zero gradients

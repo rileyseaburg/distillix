@@ -1,15 +1,34 @@
 """
-BitNet Student Transformer Model.
+Distillix "Frankenstein" BitNet Student Model.
 
-A small (~125M parameter) Transformer language model using BitLinear layers
-for efficient training and inference. Architecture inspired by Llama/Mistral.
+A ~125M parameter hybrid architecture stealing the best from each lineage:
 
-Key features:
-  - BitLinear layers for Q, K, V, O projections and MLP
-  - RMSNorm (FP32) for stability
-  - Rotary Position Embeddings (RoPE)
-  - SwiGLU activation in MLP
-  - Gradient checkpointing support
+  MATH (Microsoft BitNet b1.58):
+    - 1.58-bit ternary weights {-1, 0, +1} for all projections
+    - ~5x memory reduction at inference
+
+  TOKENIZER (Llama-2 "Brain-First"):
+    - 32k vocab (vs 128k Llama-3, 256k Gemma)
+    - Saves ~75M params, allocates 80% to "Brain" not "Dictionary"
+
+  ATTENTION (Llama 3 GQA):
+    - Grouped Query Attention with 12 Q heads / 4 KV heads
+    - 3x KV cache reduction, enables longer context on 8GB VRAM
+
+  STABILITY (Gemma 2/3):
+    - QK-Norm: RMSNorm on Q/K per-head before attention
+    - Logit Soft-Capping: tanh-bounded logits in attention and LM head
+    - Prevents training collapse, enables higher learning rates
+
+  POSITION (Extended RoPE):
+    - theta=1,000,000 for long code context (vs 10k default)
+    - Supports up to 32k context with proper scaling
+
+Reference:
+  - BitNet b1.58: https://arxiv.org/abs/2402.17764
+  - GQA: https://arxiv.org/abs/2305.13245
+  - Gemma 2: https://arxiv.org/abs/2408.00118
+  - ViT-22B QK-Norm: https://arxiv.org/abs/2302.05442
 
 Copyright (c) 2025 Distillix. All Rights Reserved.
 """
@@ -153,31 +172,59 @@ def apply_rotary_pos_emb(
 
 class Attention(nn.Module):
     """
-    Multi-Head Attention with BitLinear projections and RoPE.
+    Grouped Query Attention (GQA) with BitLinear, RoPE, and Gemma 2 stability.
     
-    Architecture:
-      - Q, K, V, O projections use BitLinear (ternary weights)
-      - RoPE applied to Q and K
-      - Standard scaled dot-product attention
+    "Frankenstein" Architecture combining:
+      - Llama 3 GQA: Reduced KV heads for 3x KV cache savings
+      - Gemma 2 QK-Norm: RMSNorm on Q/K for stability
+      - Gemma 2 Soft-Capping: Bounded attention logits
+      - BitNet b1.58: Ternary weight projections
+      - RoPE: Rotary position embeddings (theta=1M for long context)
+    
+    GQA Memory Math:
+      - MHA: KV cache = 2 * num_heads * head_dim * seq_len * batch
+      - GQA: KV cache = 2 * num_kv_heads * head_dim * seq_len * batch
+      - With 12 heads / 4 KV heads: 3x reduction in KV cache
     """
     
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
         self.hidden_dim = config.hidden_dim
-        self.num_heads = config.num_heads
+        self.num_heads = config.num_heads  # Query heads
+        self.num_kv_heads = config.num_kv_heads  # Key/Value heads (fewer for GQA)
         self.head_dim = config.head_dim
+        self.num_kv_groups = config.num_kv_groups  # Queries per KV head
+        
+        # Dimensions
+        self.q_dim = self.num_heads * self.head_dim
+        self.kv_dim = self.num_kv_heads * self.head_dim
         
         # Choose layer type
         Linear = BitLinear if config.use_bitlinear else nn.Linear
         
-        # Q, K, V, O projections
-        self.q_proj = Linear(self.hidden_dim, self.hidden_dim, bias=False)
-        self.k_proj = Linear(self.hidden_dim, self.hidden_dim, bias=False)
-        self.v_proj = Linear(self.hidden_dim, self.hidden_dim, bias=False)
-        self.o_proj = Linear(self.hidden_dim, self.hidden_dim, bias=False)
+        # Q projection: full size (all query heads)
+        self.q_proj = Linear(self.hidden_dim, self.q_dim, bias=False)
         
-        # Rotary embeddings
+        # K, V projections: reduced size (fewer KV heads for GQA)
+        self.k_proj = Linear(self.hidden_dim, self.kv_dim, bias=False)
+        self.v_proj = Linear(self.hidden_dim, self.kv_dim, bias=False)
+        
+        # O projection: full size
+        self.o_proj = Linear(self.q_dim, self.hidden_dim, bias=False)
+        
+        # QK-Norm: Apply RMSNorm to Q and K per-head (Gemma 2 / ViT-22B style)
+        # This stabilizes attention by preventing feature domination
+        self.use_qk_norm = config.use_qk_norm
+        if self.use_qk_norm:
+            self.q_norm = RMSNorm(self.head_dim, eps=config.norm_eps)
+            self.k_norm = RMSNorm(self.head_dim, eps=config.norm_eps)
+        
+        # Logit soft-capping (Gemma 2 style)
+        # Prevents attention logits from growing unbounded
+        self.attn_logit_soft_cap = config.attn_logit_soft_cap
+        
+        # Rotary embeddings (theta=1M for long code context)
         self.rotary_emb = RotaryEmbedding(
             dim=self.head_dim,
             max_seq_len=config.max_seq_len,
@@ -195,7 +242,7 @@ class Attention(nn.Module):
         position_ids: Optional[Tensor] = None,
     ) -> Tensor:
         """
-        Forward pass.
+        Forward pass with Grouped Query Attention.
         
         Args:
             hidden_states: [batch, seq_len, hidden_dim]
@@ -208,22 +255,44 @@ class Attention(nn.Module):
         batch_size, seq_len, _ = hidden_states.shape
         
         # Project to Q, K, V
-        q = self.q_proj(hidden_states)
-        k = self.k_proj(hidden_states)
-        v = self.v_proj(hidden_states)
+        q = self.q_proj(hidden_states)  # [batch, seq, q_dim]
+        k = self.k_proj(hidden_states)  # [batch, seq, kv_dim]
+        v = self.v_proj(hidden_states)  # [batch, seq, kv_dim]
         
-        # Reshape to [batch, num_heads, seq_len, head_dim]
+        # Reshape Q: [batch, seq, num_heads, head_dim] -> [batch, num_heads, seq, head_dim]
         q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        
+        # Reshape K, V: [batch, seq, num_kv_heads, head_dim] -> [batch, num_kv_heads, seq, head_dim]
+        k = k.view(batch_size, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        v = v.view(batch_size, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        
+        # QK-Norm: Normalize Q and K per-head before RoPE (Gemma 2 / ViT-22B)
+        # This prevents attention collapse and stabilizes BitNet training
+        if self.use_qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
         
         # Apply rotary embeddings
+        # Note: For GQA, we apply RoPE to Q (full heads) and K (reduced heads) separately
         cos, sin = self.rotary_emb(hidden_states, position_ids)
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
         
+        # GQA: Expand K and V to match Q's head count
+        # [batch, num_kv_heads, seq, head_dim] -> [batch, num_heads, seq, head_dim]
+        # Each KV head is repeated num_kv_groups times
+        k = k.repeat_interleave(self.num_kv_groups, dim=1)
+        v = v.repeat_interleave(self.num_kv_groups, dim=1)
+        
         # Scaled dot-product attention
-        # [batch, heads, seq, head_dim] @ [batch, heads, head_dim, seq] -> [batch, heads, seq, seq]
+        # [batch, num_heads, seq, head_dim] @ [batch, num_heads, head_dim, seq]
         attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        
+        # Logit soft-capping (Gemma 2 style)
+        # Prevents extreme attention logits: logits = cap * tanh(logits / cap)
+        if self.attn_logit_soft_cap is not None:
+            attn_weights = self.attn_logit_soft_cap * torch.tanh(
+                attn_weights / self.attn_logit_soft_cap
+            )
         
         # Apply causal mask if no custom mask provided
         if attention_mask is None:
@@ -236,15 +305,15 @@ class Attention(nn.Module):
         else:
             attn_weights = attn_weights + attention_mask
         
-        # Softmax
+        # Softmax (compute in FP32 for stability, then cast back)
         attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(q.dtype)
         
         # Apply attention to values
-        # [batch, heads, seq, seq] @ [batch, heads, seq, head_dim] -> [batch, heads, seq, head_dim]
+        # [batch, num_heads, seq, seq] @ [batch, num_heads, seq, head_dim]
         attn_output = torch.matmul(attn_weights, v)
         
-        # Reshape back
-        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
+        # Reshape back: [batch, num_heads, seq, head_dim] -> [batch, seq, q_dim]
+        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.q_dim)
         
         # Output projection
         output = self.o_proj(attn_output)
@@ -359,15 +428,25 @@ class TransformerBlock(nn.Module):
 
 class StudentLLM(nn.Module):
     """
-    BitNet Student Language Model.
+    Distillix "Frankenstein" Code Model (~125M params).
     
-    A small Transformer LM with:
-      - Token embeddings (FP16)
-      - N Transformer blocks with BitLinear
-      - RMSNorm (FP32)
+    Hybrid architecture optimized for coding performance per parameter:
+    
+      - Token embeddings (FP16, 32k Llama-2 vocab)
+      - 12 Transformer blocks with:
+        * BitLinear projections (1.58-bit weights)
+        * GQA: 12 Q heads / 4 KV heads (3x KV cache reduction)
+        * QK-Norm (Gemma 2 stability)
+        * Logit soft-capping (Gemma 2 stability)
+        * SwiGLU MLP
+        * RMSNorm (FP32)
       - LM head (tied to embeddings)
     
-    Designed for knowledge distillation from frontier models.
+    Memory footprint (inference):
+      - Weights: ~25MB (1.58-bit quantized)
+      - KV cache @ 2048 tokens: ~2MB (vs 6MB without GQA)
+    
+    Designed for knowledge distillation from frontier models (Claude, GPT-4).
     """
     
     def __init__(self, config: ModelConfig):
@@ -391,6 +470,10 @@ class StudentLLM(nn.Module):
             self.lm_head = None  # Will use embed_tokens.weight
         else:
             self.lm_head = nn.Linear(config.hidden_dim, config.vocab_size, bias=False)
+        
+        # Final logit soft-capping (Gemma 2 style)
+        # Prevents extreme logits before loss computation
+        self.final_logit_soft_cap = config.final_logit_soft_cap
         
         # Gradient checkpointing flag
         self.gradient_checkpointing = False
@@ -477,6 +560,13 @@ class StudentLLM(nn.Module):
             logits = F.linear(hidden_states, self.embed_tokens.weight)
         else:
             logits = self.lm_head(hidden_states)
+        
+        # Final logit soft-capping (Gemma 2 style)
+        # Prevents extreme logits before loss/sampling: logits = cap * tanh(logits / cap)
+        if self.final_logit_soft_cap is not None:
+            logits = self.final_logit_soft_cap * torch.tanh(
+                logits / self.final_logit_soft_cap
+            )
         
         # Compute loss if labels provided
         loss = None

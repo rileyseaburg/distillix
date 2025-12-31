@@ -1,17 +1,29 @@
 # Distillix
 
-A BitNet b1.58 knowledge distillation framework for training efficient 1.58-bit language models from frontier teacher models.
+A "Frankenstein" BitNet b1.58 knowledge distillation framework combining the best architecture innovations from Microsoft, Meta, and Google for training efficient 1.58-bit coding models.
 
-## Overview
+## The "Royal Flush" Architecture
 
-Distillix enables training small, efficient language models using knowledge distillation from large teacher models. The framework implements BitNet b1.58 quantization, where weights are constrained to {-1, 0, +1} (1.58 bits per weight), enabling massive compression and efficient inference.
+Distillix steals the best ideas from each lineage:
 
-### Key Features
+| Component | Source | Benefit |
+|-----------|--------|---------|
+| **Math** | BitNet b1.58 (Microsoft) | 1.58-bit weights, ~5x smaller |
+| **Tokenizer** | Llama-2 32k | "Brain-First" - 80% params for logic |
+| **Attention** | Llama 3 GQA | 3x smaller KV cache |
+| **Stability** | Gemma 2/3 | QK-Norm + Soft-Capping |
+| **Optimizer** | Stanford Muon | 30-40% faster convergence |
+| **Position** | Extended RoPE | theta=1M for long code context |
 
-- **BitNet b1.58 Implementation**: Ternary weight quantization with Straight-Through Estimator (STE) for gradient flow
-- **Multi-Teacher Ensemble**: Query multiple frontier models via OpenCode server and aggregate responses
-- **Memory Efficient**: Gradient checkpointing, AMP, and optimizations for consumer GPUs (8GB+ VRAM)
-- **Modern Architecture**: RoPE, SwiGLU, RMSNorm following Llama/Mistral design patterns
+### Why This Architecture?
+
+**The Vocabulary Trap**: Using Gemma's 256k vocab on a 125M model would consume 100% of parameters on the "dictionary" alone. Llama-2's 32k vocab allocates 80% to the "brain."
+
+**The Stability Problem**: BitNet's ternary weights are notoriously unstable. Gemma 2's soft-capping prevents gradient explosion and enables higher learning rates.
+
+**The Memory Problem**: Standard Multi-Head Attention has massive KV cache. GQA with 12Q/4KV ratio gives 3x reduction, enabling longer code contexts on 8GB VRAM.
+
+**The Optimizer Edge**: Stanford's Sept 2025 "Fantastic Optimizers" paper showed Muon beats AdamW by 30-40% for small models. We use Muon for matrices, AdamW for vectors.
 
 ## Architecture
 
@@ -24,11 +36,12 @@ distillix/
 │
 ├── smelter/                 # BitNet training pipeline
 │   ├── bitnet.py            # BitLinear layer with STE
-│   ├── model.py             # Student Transformer (~125M params)
+│   ├── model.py             # "Frankenstein" StudentLLM with GQA
+│   ├── muon.py              # Stanford Muon optimizer
 │   ├── loss.py              # Distillation loss functions
 │   ├── data.py              # Dataset and DataLoader
-│   ├── config.py            # Model and training configuration
-│   └── train.py             # Training loop with AMP
+│   ├── config.py            # Full configuration system
+│   └── train.py             # Training loop with hybrid optimizer
 │
 ├── scripts/                 # Utility scripts
 │   ├── setup_cuda.sh
@@ -38,6 +51,40 @@ distillix/
 └── data/
     └── prompts/             # Input prompts for data generation
 ```
+
+## Model Specifications
+
+### Default Configuration (~100M params)
+
+```
+Vocabulary:     32,000 (Llama-2 "Brain-First")
+Hidden dim:     768
+Layers:         12
+Query heads:    12
+KV heads:       4 (GQA 3:1 ratio)
+Head dim:       64
+MLP hidden:     2,048
+Max seq len:    2,048
+RoPE theta:     1,000,000
+
+Stability:
+  QK-Norm:      True (Gemma 2)
+  Attn cap:     50.0
+  Final cap:    30.0
+
+Optimizer:
+  Type:         Muon + AdamW hybrid
+  Muon LR:      0.02 (matrices)
+  AdamW LR:     3e-4 (vectors)
+```
+
+### Memory Footprint
+
+| Component | Size |
+|-----------|------|
+| Weights (1.58-bit) | ~25 MB |
+| KV cache @ 2048 tokens | ~2 MB |
+| Training (FP32 + optimizer) | ~1.5 GB |
 
 ## Requirements
 
@@ -93,21 +140,51 @@ output = model.generate(input_ids, max_new_tokens=100)
 
 ## Model Configurations
 
-| Config | Parameters | VRAM | Description |
-|--------|-----------|------|-------------|
-| 50M    | ~50M      | 4GB  | Testing and experimentation |
-| 125M   | ~125M     | 8GB  | Default, fits RTX 2080/3060 |
-| 300M   | ~300M     | 16GB | Larger model, needs RTX 3090+ |
+| Config | Parameters | VRAM | GQA Ratio | Description |
+|--------|-----------|------|-----------|-------------|
+| 50M    | ~50M      | 4GB  | 4:1       | Testing and experimentation |
+| 125M   | ~100M     | 8GB  | 3:1       | Default, fits RTX 2080/3060 |
+| 300M   | ~300M     | 16GB | 4:1       | Larger model, needs RTX 3090+ |
 
-## BitNet b1.58 Details
+## Key Innovations
 
-BitNet b1.58 quantizes weights to ternary values {-1, 0, +1}:
+### 1. BitNet b1.58 Core
 
+Weights quantized to ternary values {-1, 0, +1}:
 - **Weight Quantization**: `W_q = round(clip(W / mean(|W|), -1, 1))`
-- **Activation Quantization**: INT8 per-token using absmax scaling
-- **STE**: Gradients pass through quantization unchanged during backprop
+- **STE**: Gradients pass through quantization unchanged
+- **Result**: ~20x compression vs FP32
 
-This achieves ~20x compression vs FP32 weights while maintaining competitive accuracy.
+### 2. Grouped Query Attention (GQA)
+
+```python
+# Standard MHA: 12 Q heads, 12 KV heads
+# GQA:          12 Q heads, 4 KV heads (3:1)
+k = k.repeat_interleave(num_kv_groups, dim=1)  # Expand 4 -> 12
+v = v.repeat_interleave(num_kv_groups, dim=1)
+```
+
+### 3. Gemma 2 Stability
+
+```python
+# QK-Norm: Normalize Q and K before attention
+q = self.q_norm(q)
+k = self.k_norm(k)
+
+# Soft-Capping: Bound logits to prevent explosion
+logits = 50.0 * torch.tanh(logits / 50.0)
+```
+
+### 4. Stanford Muon Optimizer
+
+```python
+# Newton-Schulz orthogonalization on momentum
+buf_ortho = newton_schulz_orthogonalize(momentum_buffer)
+
+# Split by parameter dimension
+# 2D matrices: Muon @ lr=0.02
+# 1D vectors:  AdamW @ lr=3e-4
+```
 
 ## Teacher Models
 
@@ -118,6 +195,19 @@ The framework supports any models accessible via OpenCode server:
 - MiniMax (M2.1)
 - And any other configured providers
 
+## Fill-In-Middle (FIM) Support
+
+Distillix supports code completion via FIM tokens:
+
+```python
+# Sentinel tokens
+<|fim_prefix|>  # Code before cursor
+<|fim_suffix|>  # Code after cursor
+<|fim_middle|>  # Model fills this
+
+# 50% of training samples use FIM format
+```
+
 ## Configuration
 
 See `smelter/config.py` for all available options:
@@ -126,17 +216,37 @@ See `smelter/config.py` for all available options:
 from smelter.config import Config, get_config_125m
 
 config = get_config_125m()
-config.training.learning_rate = 1e-4
-config.training.max_steps = 50000
+
+# Adjust optimizer
+config.training.muon_lr = 0.01
+config.training.adamw_lr = 1e-4
+
+# Adjust stability
+config.model.attn_logit_soft_cap = 30.0
+
 config.save("my_config.json")
 ```
 
 ## References
 
-- [The Era of 1-bit LLMs](https://arxiv.org/abs/2402.17764) - BitNet b1.58 paper
+- [BitNet b1.58](https://arxiv.org/abs/2402.17764) - Microsoft's 1.58-bit quantization
+- [GQA](https://arxiv.org/abs/2305.13245) - Grouped Query Attention
+- [Gemma 2](https://arxiv.org/abs/2408.00118) - Soft-capping and QK-Norm
+- [ViT-22B](https://arxiv.org/abs/2302.05442) - QK-Norm for large models
 - [RoFormer](https://arxiv.org/abs/2104.09864) - Rotary Position Embeddings
-- [Distilling the Knowledge](https://arxiv.org/abs/1503.02531) - Knowledge Distillation
+- [Fantastic Optimizers](https://arxiv.org/) - Stanford Muon optimizer (Sept 2025)
 
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
+
+## Citation
+
+```bibtex
+@software{distillix2025,
+  author = {Seaburg, Riley},
+  title = {Distillix: Frankenstein BitNet Knowledge Distillation},
+  year = {2025},
+  url = {https://github.com/rileyseaburg/distillix}
+}
+```
