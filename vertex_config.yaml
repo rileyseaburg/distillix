@@ -1,0 +1,22 @@
+workerPoolSpecs:
+  - machineSpec:
+      machineType: g2-standard-8
+      acceleratorType: NVIDIA_L4
+      acceleratorCount: 1
+    replicaCount: 1
+    containerSpec:
+      imageUri: us-docker.pkg.dev/vertex-ai/training/pytorch-gpu.2-0.py310:latest
+      command:
+        - bash
+        - -c
+        - |
+          pip install transformers huggingface_hub
+          curl -sL https://raw.githubusercontent.com/rileyseaburg/distillix/main/vertex_training.py -o train.py
+          python train.py
+      env:
+        - name: MAX_STEPS
+          value: "10000"
+        - name: BATCH_SIZE
+          value: "16"
+        - name: MUON_LR
+          value: "0.02"
