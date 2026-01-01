@@ -22,6 +22,19 @@ Step  5000 | Loss: 0.30
 Step 10000 | Loss: 0.28
 ```
 
+### LM-Eval Harness Results (0-shot, n=100)
+
+| Benchmark | Accuracy | Random Baseline |
+|-----------|----------|-----------------|
+| **HellaSwag** | 28.0% | 25% |
+| **ARC-Easy** | 27.0% | 25% |
+| **PIQA** | 53.0% | 50% |
+| **BoolQ** | 48.0% | 50% |
+
+⚠️ **Note:** Model trained on only 861 samples for stability testing. 
+Performance near random baseline is expected - real capability requires 
+training on the full 10k+ dataset.
+
 ### Inference Benchmarks
 
 | Metric | Value |
@@ -45,7 +58,7 @@ Step 10000 | Loss: 0.28
 
 ---
 
-## v0.4 Real Dataset (In Progress)
+## v0.4 Real Dataset (Planned)
 
 **Purpose:** Train on real-world coding data for actual capability
 
@@ -57,16 +70,13 @@ Batch Size:   2 x 8 = 16 effective
 Optimizer:    Muon + AdamW hybrid
 Checkpointing: Enabled (2.27 GB VRAM)
 Target Steps: 20,000
-ETA:          ~2.7 hours
 ```
 
-### Training Progress
-```
-Step   100 | Loss: 9.28
-Step   300 | Loss: 5.29
-Step   600 | Loss: 3.92
-...training in progress...
-```
+### Expected Improvements
+- Training on 12x more data (10,861 vs 861 samples)
+- 4x longer context (1024 vs 256 tokens)
+- Real-world coding trajectories from SWE-rebench
+- Should show meaningful improvement over random baseline
 
 ---
 
