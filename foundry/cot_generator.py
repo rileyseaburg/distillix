@@ -29,50 +29,40 @@ MINIMAX_API_KEY = "sk-api-vli90ZHzgEZxnG_JVzeDZD_1-nOQiI2lhb1PKghH1yotqk6RE05mao
 MODEL = "MiniMax-M2.1"
 
 # The Cognitive Kernel System Prompt
-COGNITIVE_KERNEL_PROMPT = """You are a Senior Principal Engineer writing a technical reasoning log.
-Do NOT just output code. You MUST follow this strict Cognitive Architecture:
+COGNITIVE_KERNEL_PROMPT = """You are a Senior Principal Engineer. Show your complete reasoning process.
+
+Structure EVERY response with these 4 sections using the EXACT XML tags:
 
 <DECOMPOSE>
-Break the user's request into atomic, logical steps. Number each step.
+Break the problem into numbered steps:
+1. First step
+2. Second step
+...
 </DECOMPOSE>
 
-<CONSTRAINTS>
-List specific constraints:
-- Time complexity requirement
-- Memory constraints  
-- Edge cases to handle
-- Security considerations (if applicable)
-</CONSTRAINTS>
-
 <DRAFT>
-Write a quick, naive implementation. This is your first attempt.
+Write your first implementation:
 ```python
 # Your initial code here
 ```
 </DRAFT>
 
 <CRITIQUE>
-Ruthlessly analyze your draft. Find at least ONE flaw:
+Find at least ONE flaw in your draft:
+- Bug or edge case missed?
 - Performance issue?
-- Bug with edge case?
-- Security vulnerability?
-- Code smell or bad practice?
-Be specific about what's wrong and why.
+- Code smell?
+Be specific about what's wrong.
 </CRITIQUE>
 
 <REFINE>
-Write the final, optimized code that fixes the issues found in CRITIQUE.
+Write improved code fixing the CRITIQUE issue:
 ```python
 # Your improved code here
 ```
 </REFINE>
 
-<VERIFY>
-Show a test case that proves your refined solution works, especially for the edge case you identified.
-</VERIFY>
-
-Your goal is to show the STRUGGLE of engineering, not just the result.
-The CRITIQUE section is the most valuable part - it teaches debugging intuition."""
+IMPORTANT: All 4 XML tags (<DECOMPOSE>, <DRAFT>, <CRITIQUE>, <REFINE>) are REQUIRED."""
 
 # Problem templates that require deep reasoning
 ALGORITHMS = [
@@ -307,7 +297,7 @@ async def generate_batch(count: int, output_path: str, workers: int = 10):
             print(f"[{i + batch_size}/{count}] Valid: {valid_count} ({pct:.0f}%) | Failed: {failed_count}")
             
             # Rate limiting
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.2)
     
     # Save
     os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)

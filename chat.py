@@ -42,6 +42,7 @@ def generate(model, tokenizer, prompt, max_tokens=200, temperature=0.7,
     """
     input_ids = tokenizer.encode(prompt, return_tensors='pt').cuda()
     generated = input_ids.clone()
+    prev_text = ''  # Track previous output for streaming
     
     # Track generated tokens for repetition penalty
     generated_tokens = set()
@@ -87,16 +88,18 @@ def generate(model, tokenizer, prompt, max_tokens=200, temperature=0.7,
             
             generated = torch.cat([generated, next_token], dim=1)
             
-            # Stream token
-            token_str = tokenizer.decode(next_token[0], skip_special_tokens=True)
-            print(token_str, end='', flush=True)
+            # Stream token - use full decode for proper whitespace handling
+            full_text = tokenizer.decode(generated[0, input_ids.shape[1]:], skip_special_tokens=True)
+            new_text = full_text[len(prev_text):]
+            prev_text = full_text
+            print(new_text, end='', flush=True)
             
             # Stop conditions
             if next_token.item() == tokenizer.eos_token_id:
                 break
             
             # Stop on newline after reasonable output
-            if '\n' in token_str and generated.shape[1] > input_ids.shape[1] + 20:
+            if '\n' in new_text and generated.shape[1] > input_ids.shape[1] + 20:
                 break
     
     print()  # Newline
