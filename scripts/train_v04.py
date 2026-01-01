@@ -31,9 +31,18 @@ print("="*60)
 config = get_config_125m()
 device = torch.device('cuda')
 
-# Create fresh model
-print("\nInitializing fresh model...")
+# Create model and load from checkpoint
+print("\nInitializing model from v0.3 checkpoint...")
 model = StudentLLM(config.model).to(device)
+
+# Load v0.3 burn-in weights
+checkpoint_path = 'artifacts/distillix-v0.3-burnin-861.pt'
+checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+if 'model_state_dict' in checkpoint:
+    model.load_state_dict(checkpoint['model_state_dict'])
+else:
+    model.load_state_dict(checkpoint)
+print(f"Loaded weights from: {checkpoint_path}")
 
 # ENABLE GRADIENT CHECKPOINTING - Key for longer sequences!
 model.enable_gradient_checkpointing()
