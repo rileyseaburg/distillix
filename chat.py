@@ -74,6 +74,12 @@ def main():
     print("  DISTILLIX CHAT")
     print("  100M BitNet b1.58 Language Model")
     print("="*50)
+    
+    if 'burnin' in args.checkpoint:
+        print("\n⚠️  WARNING: This is the burn-in model (861 samples only)")
+        print("   Output will be largely incoherent - this is expected!")
+        print("   Train on full 10k+ dataset for coherent responses.")
+    
     print(f"\nLoading {args.checkpoint}...")
     
     model = load_model(args.checkpoint)
