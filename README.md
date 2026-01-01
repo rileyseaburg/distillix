@@ -86,6 +86,14 @@ Optimizer:
 | KV cache @ 2048 tokens | ~2 MB |
 | Training (FP32 + optimizer) | ~1.5 GB |
 
+## Pretrained Models
+
+| Model | Samples | Steps | Download |
+|-------|---------|-------|----------|
+| v0.3-burnin | 861 | 10k | [HuggingFace](https://huggingface.co/rileyseaburg/distillix-100m-v0.3) |
+
+See [BENCHMARKS.md](BENCHMARKS.md) for evaluation results.
+
 ## Requirements
 
 - Python 3.10+
@@ -106,35 +114,65 @@ pip install -r requirements.txt
 
 ## Quick Start
 
-### 1. Generate Training Data
-
-First, start the OpenCode server, then generate distillation data:
+### Chat with the Model
 
 ```bash
-# Start OpenCode server (in separate terminal)
-opencode serve --port 4096
+# Interactive chat
+python chat.py
 
-# Generate training data from teacher models
-python -m foundry.generate --builtin --output data/distillation/train.jsonl
+# With custom settings
+python chat.py --temperature 0.5 --max-tokens 300
 ```
 
-### 2. Train the Student Model
+### Generate Training Data
 
 ```bash
-python -m smelter.train --config config.json
+# High-throughput generation via MiniMax API
+python -m foundry.minimax_direct --count 1000 --workers 50 --output data/distillation/train.jsonl
 ```
 
-### 3. Run Inference
+### Train
+
+```bash
+# Continue training from checkpoint
+python scripts/continue_train.py
+
+# Full training with gradient checkpointing (1024 tokens)
+python scripts/train_v04.py
+```
+
+### Export Model
+
+```bash
+# Export to SafeTensors
+python -m smelter.export -c artifacts/model.pt -f safetensors -o exports/model
+
+# Export to GGUF (for llama.cpp)
+python -m smelter.export -c artifacts/model.pt -f gguf -o exports/model.gguf
+```
+
+### Run Benchmarks
+
+```bash
+# Quick benchmark
+python -c "
+from lm_eval import evaluator
+# See BENCHMARKS.md for full setup
+"
+```
+
+### Python API
 
 ```python
 from smelter.model import StudentLLM
 from smelter.config import get_config_125m
+import torch
 
 config = get_config_125m()
-model = StudentLLM(config.model)
-model.load_state_dict(torch.load("artifacts/students/model.pt"))
+model = StudentLLM(config.model).cuda()
+model.load_state_dict(torch.load('artifacts/model.pt')['model_state_dict'])
 
-# Generate text
+# Generate
 output = model.generate(input_ids, max_new_tokens=100)
 ```
 
