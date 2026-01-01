@@ -109,7 +109,7 @@ def generate(model, tokenizer, prompt, max_tokens=200, temperature=0.7,
 def main():
     parser = argparse.ArgumentParser(description='Distillix Chat')
     parser.add_argument('--checkpoint', '-c', type=str, 
-                        default='artifacts/distillix-v0.3-burnin-861.pt',
+                        default='artifacts/distillix-v05-cognitive.pt',
                         help='Model checkpoint path')
     parser.add_argument('--temperature', '-t', type=float, default=0.7,
                         help='Sampling temperature (lower = more focused)')
