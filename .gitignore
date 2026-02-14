@@ -50,10 +50,12 @@ htmlcov/
 dmypy.json
 
 # Artifacts & Data
-artifacts/
+artifacts/*
 !artifacts/.gitkeep
-data/distillation/
+data/distillation/*
 !data/distillation/.gitkeep
+data/training/*
+!data/training/.gitkeep
 *.pt
 *.pth
 *.safetensors
@@ -71,6 +73,9 @@ runs/
 *.env.local
 config.local.json
 credentials.json
+*-sa.json
+**/*-sa.json
+spotlessapi-sa.json
 
 # OS
 Thumbs.db
